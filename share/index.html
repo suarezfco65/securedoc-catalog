@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>SecureDoc — Contenido compartido</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:0; background:#f4f5f7; color:#212529; }
+  #sd-share-header { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 20px; background:#fff; border-bottom:1px solid #dee2e6; }
+  #sd-share-header .who { display:flex; align-items:center; gap:10px; }
+  #sd-share-avatar { width:40px; height:40px; border-radius:50%; object-fit:cover; flex:none; background:#6c757d; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:600; }
+  #sd-share-frame { width:100%; height:calc(100vh - 74px); border:none; background:#fff; display:block; }
+  #sd-share-msg { max-width:480px; margin:80px auto; text-align:center; padding:24px; color:#555; }
+  #sd-share-msg h1 { font-size:18px; color:#212529; margin:0 0 8px; }
+</style>
+</head>
+<body>
+<div id="sd-share-root">
+  <div id="sd-share-msg"><h1>Abriendo enlace…</h1><p>Descifrando el contenido en tu navegador.</p></div>
+</div>
+<script>
+(function () {
+  function showMessage(title, detail) {
+    document.getElementById('sd-share-root').innerHTML =
+      '<div id="sd-share-msg"><h1></h1><p></p></div>';
+    document.querySelector('#sd-share-msg h1').textContent = title;
+    document.querySelector('#sd-share-msg p').textContent = detail || '';
+  }
+
+  function b64ToBuf(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  function escapeHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function parseHash() {
+    var h = location.hash.replace(/^#/, '');
+    var params = {};
+    h.split('&').forEach(function (part) {
+      var i = part.indexOf('=');
+      if (i === -1) return;
+      params[decodeURIComponent(part.slice(0, i))] = decodeURIComponent(part.slice(i + 1));
+    });
+    return params;
+  }
+
+  async function main() {
+    if (!window.crypto || !window.crypto.subtle) {
+      showMessage('No se puede abrir aquí', 'Este enlace necesita un navegador moderno con soporte de cifrado (https://), no funciona en file:// ni en navegadores muy antiguos.');
+      return;
+    }
+    var params = parseHash();
+    var id = params.s;
+    var keyB64 = params.k;
+    if (!id || !keyB64 || !/^[A-Za-z0-9_-]+$/.test(id)) {
+      showMessage('Enlace inválido', 'Falta información en el enlace, o no tiene el formato esperado.');
+      return;
+    }
+
+    var res;
+    try {
+      res = await fetch('../shares/' + id + '.json', { cache: 'no-store' });
+    } catch (e) {
+      showMessage('No se pudo cargar', 'No se pudo conectar para traer el contenido. Revisa tu conexión e intenta de nuevo.');
+      return;
+    }
+    if (res.status === 404) {
+      showMessage('Este enlace ya no existe', 'Quien lo compartió puede haberlo borrado, o venció hace tiempo y fue reemplazado.');
+      return;
+    }
+    if (!res.ok) {
+      showMessage('No se pudo cargar', 'El servidor respondió con un error (' + res.status + ').');
+      return;
+    }
+
+    var file;
+    try { file = await res.json(); } catch (e) {
+      showMessage('Contenido inválido', 'El archivo encontrado no tiene el formato esperado.');
+      return;
+    }
+
+    var envelope;
+    try {
+      var rawKey = b64ToBuf(keyB64);
+      var key = await crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM' }, false, ['decrypt']);
+      var iv = new Uint8Array(b64ToBuf(file.iv));
+      var data = b64ToBuf(file.data);
+      var plainBuf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, data);
+      var json = new TextDecoder().decode(plainBuf);
+      envelope = JSON.parse(json);
+    } catch (e) {
+      showMessage('No se pudo abrir este enlace', 'La clave no es correcta, o el contenido fue modificado después de compartirse.');
+      return;
+    }
+
+    if (envelope.expiresAt && Date.now() > new Date(envelope.expiresAt).getTime()) {
+      showMessage('Este enlace venció', 'Quien lo compartió puede generarte uno nuevo desde SecureDoc.');
+      return;
+    }
+
+    var fecha = envelope.createdAt ? new Date(envelope.createdAt).toLocaleString() : '';
+    var avatarHtml;
+    if (envelope.avatarDataUrl) {
+      avatarHtml = '<img id="sd-share-avatar" src="' + escapeHtml(envelope.avatarDataUrl) + '" alt="" />';
+    } else {
+      var initial = (String(envelope.profileName || '').trim().charAt(0) || '?').toUpperCase();
+      avatarHtml = '<div id="sd-share-avatar">' + escapeHtml(initial) + '</div>';
+    }
+
+    var root = document.getElementById('sd-share-root');
+    root.innerHTML =
+      '<div id="sd-share-header">' +
+        '<div class="who">' + avatarHtml +
+          '<span style="font-weight:600;">' + escapeHtml(envelope.profileName || 'Usuario') + '</span>' +
+        '</div>' +
+        '<div style="text-align:right;">' +
+          '<div style="font-weight:600;">' + escapeHtml(envelope.appName || 'App') + '</div>' +
+          '<div style="font-size:12px;color:#666;">' + escapeHtml(fecha) + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<iframe id="sd-share-frame" sandbox=""></iframe>';
+    document.getElementById('sd-share-frame').srcdoc = envelope.html || '';
+  }
+
+  main();
+})();
+</script>
+</body>
+</html>
